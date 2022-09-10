@@ -1,0 +1,331 @@
+<?php
+/**************************************************************************
+ *
+ * @file cio.module
+ *
+ *************************************************************************/
+
+
+/**************************************************************************
+ * Initiate Module
+ *************************************************************************/
+function cio_init()
+{
+	$path = drupal_get_path('module', 'cio');
+
+	//include_once($path.'/forms/user_register.inc'); // needs work
+	//include_once($path.'/forms/user_profile.inc'); // needs work
+	//include_once($path.'/forms/user_pass_reset.inc'); // needs work
+	//include_once($path.'/cio.field.inc'); // needs work
+	//include_once($path.'/cio.rules.inc');	// needs work
+
+	include_once($path.'/inc/rest.inc');
+	include_once($path.'/inc/misc.inc');
+}
+
+
+/**************************************************************************
+ * On page build do tracking
+ *************************************************************************/
+function cio_page_build(&$page)
+{
+	cio_track();
+}
+
+
+/*************************************************************************
+ * Implements hook_permission() to provide a demonstration access string.
+ ************************************************************************/
+function cio_permission()
+{
+	return array(
+		'access cio' =>  array(
+			'title' => t('Access Customer.io REST API'),
+			'description' => t('Grants access to Customer.io REST API.'),
+		),
+		'admin cio' =>  array(
+			'title' => t('Administer Customer.io API'),
+			'description' => t('Grants access to administer Customer.io API.'),
+		),
+	);
+}
+
+
+/*************************************************************************
+ * Implementation of hook menu.
+ ************************************************************************/
+function cio_menu()
+{
+	$items['cio/test'] = array(
+		'title' => t("Customer.io API Test"),
+		'description' => t("Test Customer.io API."),
+		'page callback' => 'cio_test',
+		'page arguments' => array(),
+		'access callback' => 'user_access',
+		'access arguments' => array('access cio'),
+		'type' => MENU_CALLBACK,
+		'file' => 'inc/test.inc',
+    );
+    
+    $items['cio/webhooks'] = array(
+	    'title' => 'Customer.io API Webhooks',
+	    'description' => t("URL for webhooks."),
+	    'page callback' => 'cio_webhooks',
+	    'page arguments' => array(),
+	    'access callback' => 'user_access',
+	    'access arguments' => array('access content'),
+	    'type' => MENU_CALLBACK,
+	    'file' => 'cio.webhooks.inc',
+	);
+    
+    $items['cio/sync'] = array(
+	    'title' => 'Sync Existing Users',
+	    'description' => t("Sync User data with Customer.io."),
+	    'page callback' => 'cio_sync',
+	    'page arguments' => array(),
+	    'access callback' => 'user_access',
+	    'access arguments' => array('admin cio'),
+	    'type' => MENU_CALLBACK,
+	    'file' => 'cio.sync.inc',
+	);
+    
+	$items['admin/config/system/cio'] = array(
+	    'title' => 'Customer.io API Settings',
+	    'description' => t("Configure Customer.io API Settings."),
+	    'page callback' => 'drupal_get_form',
+	    'page arguments' => array('cio_settings_form'),
+	    'access callback' => 'user_access',
+	    'access arguments' => array('admin cio'),
+	    'type' => MENU_NORMAL_ITEM,
+	    'file' => 'cio.admin.inc',
+	);
+	
+	$items['admin/config/system/cio/settings'] = array(
+		'title' => 'Customer.io API Settings',
+		'description' => t("Configure Customer.io API Settings."),
+		'type' => MENU_DEFAULT_LOCAL_TASK,
+		'weight' => 0
+	);
+	
+	$items['admin/config/system/cio/config'] = array(
+	    'title' => 'System Configuration',
+	    'description' => t("Set Customer.io to Send Drupal System Emails."),
+	    'page callback' => 'drupal_get_form',
+	    'page arguments' => array('cio_config_form'),
+	    'access callback' => 'user_access',
+	    'access arguments' => array('admin cio'),
+	    'type' => MENU_LOCAL_TASK,
+	    'file' => 'cio.config.inc',
+	    'weight' => 1
+	);
+	
+	
+	return $items;
+}
+
+
+/**************************************************************************
+ * Get a list of system mail keys
+ *************************************************************************/
+function cio_system_mail_keys()
+{
+
+ /* 
+ 	Drupal functionality for identifying when to notify 
+	By default, we always notify except for canceled and blocked.
+	$default_notify = ($op != 'status_canceled' && $op != 'status_blocked');
+	$notify = variable_get('user_mail_' . $op . '_notify', $default_notify);
+	variable_get('user_mail_status_canceled_notify', FALSE)
+ */
+
+	$keys = array(
+		'register_admin_created' => t("Welcome, Account Created by Administrator"),
+		'register_no_approval_required' => t("Welcome to :site", array(':site' => variable_get('site_name', ''))),
+		'register_pending_approval' => t("Welcome, Account is pending approval"),
+		'register_pending_approval_admin' => t("Admin - account is pending approval"),
+		'password_reset' => t("Password Reset"),
+		'status_activated' => t("Accounted Activated"),		
+		'status_blocked' => t("Account Blocked"),
+		'cancel_confirm' => t("Account Closed, Please Confirm"),
+		'status_canceled' => t("Account Closed"),
+	);
+
+	switch(variable_get('user_register', USER_REGISTER_VISITORS_ADMINISTRATIVE_APPROVAL))
+	{
+		case 0: // Administrators only registration of new accounts
+
+			foreach($keys as $key => $val)
+			{
+				if(!in_array($key, array('register_admin_created', 'password_reset', 'status_blocked', 'status_canceled', 'cancel_confirm')))
+				{
+					unset($keys[$key]);
+				}
+			}
+		
+		break;
+
+		case 1: // Visitors can register no approval
+		
+			foreach($keys as $key => $val)
+			{
+				if(!in_array($key, array('register_no_approval_required', 'password_reset', 'status_blocked', 'status_canceled', 'cancel_confirm')))
+				{
+					unset($keys[$key]);
+				}
+			}
+		
+			if(variable_get('user_email_verification', TRUE) == FALSE)
+			{
+				$keys['register_no_approval_required'] = t("Verify your email for :site", array(':site' => variable_get('site_name', '')));
+			}
+			
+		break;
+		
+		case 2: // Visitors can register but administrator approval is required
+		
+			foreach($keys as $key => $val)
+			{
+				if(!in_array($key, array('register_pending_approval', 'status_activated', 'password_reset', 'status_blocked', 'status_canceled', 'cancel_confirm')))
+				{
+					unset($keys[$key]);
+				}
+			}
+			
+		break;
+	}
+	
+	
+	$keys['register'] = t("Welcome Email");
+	//print_r($keys);
+	
+	// support overriding "Invite" email from Group Module (ginvite)
+	if(module_exists('ginvite'))
+	{
+		$keys['invite'] = t("Group - Invitation to join a group");
+	}
+	
+	return $keys;
+}
+
+
+/**************************************************************************
+ * Drupal variables available in Mail as tokens
+ *************************************************************************/
+function cio_system_mail_vars()
+{
+	$vars = array(		
+		'site-name',
+		'site-url',
+		'site-login-url', 
+		'site-url-brief',
+		'user-name', 
+		'user-mail', 				 
+		'user-edit-url', 
+		'user-one-time-login-url', 
+		'user-cancel-url',
+	);
+	
+	if(module_exists('ginvite'))
+	{
+		array_push($vars, 'group');
+	}
+	
+	return $vars;
+}
+
+
+/*************************************************************************
+ * Hook Form Alter
+ ************************************************************************/
+function cio_form_alter(&$form, &$form_state, $form_id)
+{
+	switch($form['#form_id'])
+	{
+		case 'user_admin_settings':
+
+			$overrides = variable_get('cio_email_overrides', array());
+			if(count($overrides) > 0)
+			{
+				$form['email_title']['#suffix'] = '<div class="messages warning">Some of these messages are currently being overridden by the <a href="/admin/config/system/cio/config">cio module mail configuration</a>.</div>';
+			}
+
+		break;
+	}
+	
+}
+
+
+/*************************************************************************
+ * Hook Mail Alter
+ *
+ *  system mail keys:
+ *		cancel_confirm
+ *		password_reset
+ *		register_admin_created
+ *		register_pending_approval
+ *		register_pending_approval_admin
+ *		status_activated
+ *		status_blocked
+ *		status_canceled
+ *		password_reset
+ *		register_no_approval_required
+ *		user_registrationpassword ??
+ *
+ *  $message['send'] = FALSE; // any message can be canceled with this
+ * 
+ ************************************************************************/
+function cio_mail_alter(&$message)
+{
+	$overrides = variable_get('cio_email_overrides', array());
+	
+	if(isset($overrides[$message['key']]))
+	{
+		if(cio_sendmail($overrides[$message['key']], $message) || $overrides[$message['key']] == '_skip' || variable_get('cio_unpublished_stop_send', FALSE))
+		{
+			$message['send'] = FALSE;
+		}	
+	}
+}
+
+
+/**************************************************************************
+ * Hook User Login
+ *************************************************************************/
+function cio_user_login(&$edit, $account)
+{
+	if($account->access == 0)
+	{
+		if(!empty(variable_get('cio_newuser_segment', '')))
+		{
+			//cio_addtosegment(variable_get('cio_newuser_segment', ''), $account);
+		}
+		
+		if(!empty(variable_get('cio_remove_newuser_segment', '')))
+		{
+			//cio_removefromsegment(variable_get('cio_remove_newuser_segment', ''), $account);
+		}
+	}
+}
+
+
+/**************************************************************************
+ * 
+ *************************************************************************/
+function cio_options_list($field, $instance, $entity_type, $entity)
+{
+	$options = array();
+	
+	//if(substr_compare($field['field_name'], '_email', -strlen('_email')) === 0)
+	if(strpos($field['field_name'], '_email') !== false)
+	{
+		$options = cio_email_options();
+	}
+	
+	//if(substr_compare($field['field_name'], '_segment', -strlen('_segment')) === 0)
+	if(strpos($field['field_name'], '_segment') !== false)
+	{
+		$options = cio_segment_options();
+	}
+
+	return $options;
+}
